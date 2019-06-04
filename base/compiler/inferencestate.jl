@@ -88,7 +88,7 @@ mutable struct InferenceState
         end
 
         min_valid = src.min_world
-        max_valid = src.max_world == (typemax(UInt)%Int) ?
+        max_valid = src.max_world == typemax(UInt) ?
             get_world_counter() : src.max_world
         frame = new(
             params, result, linfo,

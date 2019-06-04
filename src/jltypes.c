@@ -2088,7 +2088,7 @@ void jl_init_types(void) JL_GC_DISABLED
                             "inlineable",
                             "propagate_inbounds",
                             "pure"),
-                        jl_svec(17,
+                        jl_svec(18,
                             jl_array_any_type,
                             jl_any_type,
                             jl_any_type,
