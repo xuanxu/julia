@@ -33,7 +33,7 @@ import Base: isless, show, print, parse, bind, convert, isreadable, iswritable, 
 using Base: LibuvStream, LibuvServer, PipeEndpoint, @handle_as, uv_error, associate_julia_struct, uvfinalize,
     notify_error, stream_wait, uv_req_data, uv_req_set_data, preserve_handle, unpreserve_handle, _UVError, IOError,
     eventloop, StatusUninit, StatusInit, StatusConnecting, StatusOpen, StatusClosing, StatusClosed, StatusActive,
-    uv_status_string, check_open, wait_connected, OS_HANDLE, RawFD,
+    iolock_begin, iolock_end, uv_status_string, check_open, OS_HANDLE, RawFD,
     UV_EINVAL, UV_ENOMEM, UV_ENOBUFS, UV_EAGAIN, UV_ECONNABORTED, UV_EADDRINUSE, UV_EACCES, UV_EADDRNOTAVAIL,
     UV_EAI_ADDRFAMILY, UV_EAI_AGAIN, UV_EAI_BADFLAGS,
     UV_EAI_BADHINTS, UV_EAI_CANCELED, UV_EAI_FAIL,
@@ -56,19 +56,18 @@ mutable struct TCPSocket <: LibuvStream
     status::Int
     buffer::IOBuffer
     cond::Base.ThreadSynchronizer
-    closenotify::Base.ThreadSynchronizer
+    readerror::Any
     sendbuf::Union{IOBuffer, Nothing}
-    lock::ReentrantLock
+    lock::ReentrantLock # advisory lock
     throttle::Int
 
     function TCPSocket(handle::Ptr{Cvoid}, status)
-        lock = Threads.SpinLock()
         tcp = new(
                 handle,
                 status,
                 PipeBuffer(),
-                Base.ThreadSynchronizer(lock),
-                Base.ThreadSynchronizer(lock),
+                Base.ThreadSynchronizer(),
+                nothing,
                 nothing,
                 ReentrantLock(),
                 Base.DEFAULT_READ_BUFFER_SZ)
@@ -105,15 +104,12 @@ mutable struct TCPServer <: LibuvServer
     handle::Ptr{Cvoid}
     status::Int
     cond::Base.ThreadSynchronizer
-    closenotify::Base.ThreadSynchronizer
 
     function TCPServer(handle::Ptr{Cvoid}, status)
-        lock = Threads.SpinLock()
         tcp = new(
             handle,
             status,
-            Base.ThreadSynchronizer(lock),
-            Base.ThreadSynchronizer(lock))
+            Base.ThreadSynchronizer())
         associate_julia_struct(tcp.handle, tcp)
         finalizer(uvfinalize, tcp)
         return tcp
@@ -157,7 +153,7 @@ mutable struct UDPSocket <: LibuvStream
     status::Int
     recvnotify::Condition
     sendnotify::Condition
-    closenotify::Base.ThreadSynchronizer
+    cond::Base.ThreadSynchronizer
 
     function UDPSocket(handle::Ptr{Cvoid}, status)
         udp = new(
@@ -183,16 +179,16 @@ end
 show(io::IO, stream::UDPSocket) = print(io, typeof(stream), "(", uv_status_string(stream), ")")
 
 function _uv_hook_close(sock::UDPSocket)
-    lock(sock.closenotify)
+    lock(sock.cond)
     try
         sock.handle = C_NULL
         sock.status = StatusClosed
-        notify(sock.closenotify)
+        notify(sock.cond)
     finally
-        unlock(sock.closenotify)
+        unlock(sock.cond)
     end
     notify(sock.sendnotify)
-    notify_error(sock.recvnotify,EOFError())
+    notify_error(sock.recvnotify, EOFError())
 end
 
 # Disables dual stack mode.
@@ -400,9 +396,10 @@ function uv_connectcb(conn::Ptr{Cvoid}, status::Cint)
             end
             notify(sock.cond)
         else
+            sock.readerror = _UVError("connect", status)
             ccall(:jl_forceclose_uv, Cvoid, (Ptr{Cvoid},), hand)
-            err = _UVError("connect", status)
-            notify_error(sock.cond, err)
+            sock.status = StatusClosing
+            notify(sock.cond)
         end
     finally
         unlock(sock.cond)
@@ -438,6 +435,25 @@ function connect!(sock::TCPSocket, host::IPv6, port::Integer)
 end
 
 connect!(sock::TCPSocket, addr::InetAddr) = connect!(sock, addr.host, addr.port)
+
+function wait_connected(x::LibuvStream)
+    iolock_begin()
+    x.readerror === nothing || throw(x.readerror)
+    check_open(x)
+    lock(x.cond)
+    try
+        while x.status == StatusConnecting
+            iolock_end()
+            stream_wait(x, x.cond)
+            iolock_begin() # TODO: this is a lock-inversion (deadlock)
+        end
+        x.readerror === nothing || throw(x.readerror)
+    finally
+        unlock(x.cond)
+    end
+    iolock_end()
+    nothing
+end
 
 # Default Host to localhost
 

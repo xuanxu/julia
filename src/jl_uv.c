@@ -71,6 +71,17 @@ void JL_UV_LOCK(void)
     }
 }
 
+JL_DLLEXPORT void jl_iolock_begin(void)
+{
+    JL_UV_LOCK();
+}
+
+JL_DLLEXPORT void jl_iolock_end(void)
+{
+    JL_UV_UNLOCK();
+}
+
+
 void jl_uv_call_close_callback(jl_value_t *val)
 {
     jl_value_t *args[2];
@@ -94,11 +105,11 @@ static void jl_uv_closeHandle(uv_handle_t *handle)
         JL_STDERR = (JL_STREAM*)STDERR_FILENO;
     // also let the client app do its own cleanup
     if (handle->type != UV_FILE && handle->data) {
-        size_t last_age = jl_get_ptls_states()->world_age;
-        // TODO: data race on jl_world_counter across many files, to be fixed in a separate revision
-        jl_get_ptls_states()->world_age = jl_world_counter;
+        jl_ptls_t ptls = jl_get_ptls_states();
+        size_t last_age = ptls->world_age;
+        ptls->world_age = jl_world_counter;
         jl_uv_call_close_callback((jl_value_t*)handle->data);
-        jl_get_ptls_states()->world_age = last_age;
+        ptls->world_age = last_age;
     }
     if (handle == (uv_handle_t*)&signal_async)
         return;

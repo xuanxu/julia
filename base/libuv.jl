@@ -45,6 +45,9 @@ disassociate_julia_struct(uv) = disassociate_julia_struct(uv.handle)
 disassociate_julia_struct(handle::Ptr{Cvoid}) =
     handle != C_NULL && ccall(:jl_uv_disassociate_julia_struct, Cvoid, (Ptr{Cvoid},), handle)
 
+iolock_begin() = ccall(:jl_iolock_begin, Cvoid, ())
+iolock_end() = ccall(:jl_iolock_end, Cvoid, ())
+
 # A dict of all libuv handles that are being waited on somewhere in the system
 # and should thus not be garbage collected
 const uvhandles = IdDict()
